@@ -8,11 +8,11 @@
 #include <Iphlpapi.h>
 #pragma comment(lib, "ws2_32.lib") // Link with ws2_32.lib for Winsock functions
 #pragma comment(lib, "Iphlpapi.lib")
-
+#include "framing.h"
 using namespace std;
 
-#define BUFFER_SIZE 255
-
+#define BUFFER_SIZE 1024
+string MAC_ADDRESS;
 void error(const char *msg)
 {
     fprintf(stderr, "%s: %d\n", msg, WSAGetLastError());
@@ -54,6 +54,7 @@ void get_mac_address(SOCKET client_socket)
                          pAdapter->Address[4], pAdapter->Address[5]);
 
                 // Send the MAC address over the socket connection
+                MAC_ADDRESS = string(mac_address);
                 send(client_socket, mac_address, strlen(mac_address), 0);
 
                 // Break after sending the first MAC address if multiple are found
@@ -74,6 +75,67 @@ void get_mac_address(SOCKET client_socket)
     }
 }
 
+class StopAndWait
+{
+    public:
+    void receiveStopAndWait(SOCKET socket_fd)
+    {
+        cout << "Receiving data using Stop and Wait" << endl;
+        char buffer[BUFFER_SIZE];
+        int expected_frame = 0; // The sequence number of the frame we are expecting
+
+        while (true)
+        {
+            clear_buffer(buffer, BUFFER_SIZE);
+            int recv_len = recv(socket_fd, buffer, BUFFER_SIZE - 1, 0);
+            if (recv_len == SOCKET_ERROR)
+            {
+                error("Error receiving data");
+            }
+            buffer[recv_len] = '\0'; // Null-terminate the received data
+            string received_frame_str(buffer);
+            cout<<"Received Frame: "<<received_frame_str<<endl;
+            if (received_frame_str == "exit")
+            {
+                cout << "Exiting..." << endl;
+                break;
+            }
+            Frame received_frame = Frame::parseFrame(received_frame_str);
+            //Frame::show(received_frame);
+            if (received_frame.validateCRC())
+            {
+                if (received_frame.frame_seq == expected_frame)
+                {
+                    // Process the received frame
+                    cout << "Frame " << received_frame.frame_seq << " received" << endl;
+                    Frame::processFrame(received_frame); // Your function to process the frame
+
+                    // Send acknowledgment for the received frame
+                    string ack = to_string(received_frame.frame_seq);
+                    send(socket_fd, ack.c_str(), ack.size(), 0);
+                    cout << "Acknowledgment for frame " << received_frame.frame_seq << " sent" << endl;
+
+                    // Update the expected frame sequence number
+                    expected_frame++;
+                }
+                else
+                {
+                    // If the frame is not the expected one, resend the acknowledgment for the last correctly received frame
+                    string ack = to_string(expected_frame - 1); // Resend acknowledgment for the last correct frame
+                    send(socket_fd, ack.c_str(), ack.size(), 0);
+                    cout << "Resent acknowledgment for frame " << (expected_frame - 1) << endl;
+                }
+            }
+            else
+            {
+                // If CRC validation fails, resend acknowledgment for the last correct frame
+                string ack = to_string(expected_frame - 1); // Resend acknowledgment for the last correct frame
+                send(socket_fd, ack.c_str(), ack.size(), 0);
+                cout << "CRC validation failed. Resent acknowledgment for frame " << (expected_frame - 1) << endl;
+            }
+        }
+    }
+};
 int main(int argc, char *argv[])
 {
     WSADATA wsaData;
@@ -143,7 +205,31 @@ int main(int argc, char *argv[])
 
     // Get and send the server's MAC address
     get_mac_address(new_socket_fd);
-
+    // Receive the flow control mechanism
+    clear_buffer(buffer, BUFFER_SIZE);
+    recv_len = recv(new_socket_fd, buffer, BUFFER_SIZE - 1, 0);
+    if (recv_len == SOCKET_ERROR)
+    {
+        error("Error receiving data");
+    }
+    buffer[recv_len] = '\0'; // Null-terminate the received data
+    string flow_control(buffer);
+    cout << "Flow Control Mechanism: " << buffer << endl;
+    if (flow_control == "StopandWait")
+    {
+        StopAndWait stopAndWait;
+        stopAndWait.receiveStopAndWait(new_socket_fd);
+    }
+    else if (flow_control == "GoBackN")
+    {
+    }
+    else if (flow_control == "SelectiveRepeat")
+    {
+    }
+    else
+    {
+        cout << "Invalid Flow Control Mechanism" << endl;
+    }
     // Cleanup
     closesocket(new_socket_fd);
     closesocket(socket_fd);
