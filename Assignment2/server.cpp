@@ -77,13 +77,12 @@ void get_mac_address(SOCKET client_socket)
 
 class StopAndWait
 {
-    public:
+public:
     void receiveStopAndWait(SOCKET socket_fd)
     {
         cout << "Receiving data using Stop and Wait" << endl;
         char buffer[BUFFER_SIZE];
-        int expected_frame = 0; // The sequence number of the frame we are expecting
-
+        int expected_frame = 0;
         while (true)
         {
             clear_buffer(buffer, BUFFER_SIZE);
@@ -92,35 +91,32 @@ class StopAndWait
             {
                 error("Error receiving data");
             }
-            buffer[recv_len] = '\0'; // Null-terminate the received data
+            buffer[recv_len] = '\0';
             string received_frame_str(buffer);
-            cout<<"Received Frame: "<<received_frame_str<<endl;
+            cout << "Received Frame: " << received_frame_str << endl;
             if (received_frame_str == "exit")
             {
                 cout << "Exiting..." << endl;
                 break;
             }
             Frame received_frame = Frame::parseFrame(received_frame_str);
-            //Frame::show(received_frame);
+            cout << "------------------------------------------------------------------";
+            // Frame::show(received_frame);
             if (received_frame.validateCRC())
             {
                 if (received_frame.frame_seq == expected_frame)
                 {
-                    // Process the received frame
                     cout << "Frame " << received_frame.frame_seq << " received" << endl;
-                    Frame::processFrame(received_frame); // Your function to process the frame
+                    Frame::processFrame(received_frame);
 
-                    // Send acknowledgment for the received frame
                     string ack = to_string(received_frame.frame_seq);
                     send(socket_fd, ack.c_str(), ack.size(), 0);
                     cout << "Acknowledgment for frame " << received_frame.frame_seq << " sent" << endl;
 
-                    // Update the expected frame sequence number
                     expected_frame++;
                 }
                 else
                 {
-                    // If the frame is not the expected one, resend the acknowledgment for the last correctly received frame
                     string ack = to_string(expected_frame - 1); // Resend acknowledgment for the last correct frame
                     send(socket_fd, ack.c_str(), ack.size(), 0);
                     cout << "Resent acknowledgment for frame " << (expected_frame - 1) << endl;
@@ -136,6 +132,122 @@ class StopAndWait
         }
     }
 };
+
+class GoBackNReceiver
+{
+private:
+    vector<Frame> packets;
+    int total_frame;
+    int window_size;
+    int expected_frame_r = 0;
+
+public:
+    GoBackNReceiver(int t, int ws)
+    {
+        total_frame = t;
+        window_size = ws;
+    }
+
+    void receiveGoBackN(SOCKET socket_fd)
+    {
+        char buffer[BUFFER_SIZE];
+
+        // while (true)
+        // {
+        //     clear_buffer(buffer, BUFFER_SIZE);
+        //     int recv_len = recv(socket_fd, buffer, BUFFER_SIZE - 1, 0);
+        //     if (recv_len == SOCKET_ERROR)
+        //     {
+        //         error("Error receiving data");
+        //     }
+        //     buffer[recv_len] = '\0';
+        //     string received_frame_str(buffer);
+        //     cout << "Received Frame: " << received_frame_str << endl;
+        //     if (received_frame_str == "exit")
+        //     {
+        //         cout << "Exiting..." << endl;
+        //         break;
+        //     }
+        //     Frame received_frame = Frame::parseFrame(received_frame_str);
+        //     if (received_frame.validateCRC())
+        //     {
+        //         if (received_frame.frame_seq == expected_frame_r)
+        //         {
+        //             cout << "Frame " << received_frame.frame_seq << " received" << endl;
+        //             packets.push_back(received_frame);
+        //             string ack = to_string(received_frame.frame_seq);
+        //             send(socket_fd, ack.c_str(), ack.size(), 0);
+        //             cout << "Acknowledgment for frame " << received_frame.frame_seq << " sent" << endl;
+        //             expected_frame_r = (expected_frame_r + 1) % window_size;
+        //             cout <<"---------------------------------------------------------------------"<<endl;
+
+        //         }
+        //         else if (received_frame.frame_seq < expected_frame_r)
+        //         {
+        //             string ack = to_string(received_frame.frame_seq);
+        //             send(socket_fd, ack.c_str(), ack.size(), 0);
+        //             cout << "Frame out of order" << ack << endl;
+        //         }
+        //         else
+        //         {
+        //             string ack = to_string(expected_frame_r - 1);
+        //             send(socket_fd, ack.c_str(), ack.size(), 0);
+        //             cout << "Frame out of order" << ack << endl;
+        //         }
+        //     }
+        // }
+        while (true)
+        {
+            char buffer[1024] = {0};
+            int bytesRead = recv(socket_fd, buffer, sizeof(buffer), 0);
+            if (bytesRead <= 0)
+                break;
+
+            std::string frame(buffer, bytesRead);
+            if (frame.empty())
+                break;
+            string received_frame_str(buffer);
+            cout << "Received Frame: " << received_frame_str << endl;
+            if (received_frame_str == "exit")
+            {
+                cout << "Exiting..." << endl;
+                break;
+            }
+            Frame received_frame = Frame::parseFrame(received_frame_str);
+            int receivedSeqNo = received_frame.frame_seq;
+
+            // If the received sequence number matches the expected one
+            if (receivedSeqNo == expected_frame_r && received_frame.validateCRC())
+            {
+                cout << "Frame " << received_frame.frame_seq << " received" << endl;
+                packets.push_back(received_frame);
+                string ack = to_string(received_frame.frame_seq);
+                send(socket_fd, ack.c_str(), ack.size(), 0);
+                cout << "Acknowledgment for frame " << received_frame.frame_seq << " sent" << endl;
+                expected_frame_r = (expected_frame_r + 1) % window_size;
+                cout << "---------------------------------------------------------------------" << endl;
+            }
+            else if (receivedSeqNo < expected_frame_r)
+            {
+                // Handle duplicate frames (already acknowledged)
+                std::cout << "Frame out of order. Rejecting Seq No: " << receivedSeqNo << std::endl;
+            }
+            else if (received_frame.validateCRC())
+            {
+                std::cout << "Frame Corrupted. Rejecting Seq No: " << receivedSeqNo << std::endl;
+            }
+            else
+            {
+                // Frame out of order
+                std::cout << "Frame out of order. Rejecting Seq No: " << receivedSeqNo << std::endl;
+            }
+        }
+
+        cout << "_____________________________________________________________________________________" << endl;
+        cout << "All frames received and acknowledged" << endl;
+    }
+};
+
 int main(int argc, char *argv[])
 {
     WSADATA wsaData;
@@ -199,7 +311,7 @@ int main(int argc, char *argv[])
     {
         error("Error receiving data");
     }
-    buffer[recv_len] = '\0'; // Null-terminate the received data
+    buffer[recv_len] = '\0';
 
     cout << "MAC Address of Client: " << buffer << endl;
 
@@ -212,7 +324,7 @@ int main(int argc, char *argv[])
     {
         error("Error receiving data");
     }
-    buffer[recv_len] = '\0'; // Null-terminate the received data
+    buffer[recv_len] = '\0';
     string flow_control(buffer);
     cout << "Flow Control Mechanism: " << buffer << endl;
     if (flow_control == "StopandWait")
@@ -222,6 +334,26 @@ int main(int argc, char *argv[])
     }
     else if (flow_control == "GoBackN")
     {
+        clear_buffer(buffer, BUFFER_SIZE);
+        recv_len = recv(new_socket_fd, buffer, BUFFER_SIZE - 1, 0);
+        if (recv_len == SOCKET_ERROR)
+        {
+            error("Error receiving data");
+        }
+        buffer[recv_len] = '\0';
+        int total_frame = stoi(buffer);
+        clear_buffer(buffer, BUFFER_SIZE);
+        recv_len = recv(new_socket_fd, buffer, BUFFER_SIZE - 1, 0);
+        if (recv_len == SOCKET_ERROR)
+        {
+            error("Error receiving data");
+        }
+        buffer[recv_len] = '\0';
+        int window_size = stoi(buffer);
+        cout << "Total Frames: " << total_frame << endl;
+        cout << "Window Size of Sender: " << window_size << endl;
+        GoBackNReceiver goBackN(total_frame, window_size);
+        goBackN.receiveGoBackN(new_socket_fd);
     }
     else if (flow_control == "SelectiveRepeat")
     {
@@ -230,7 +362,6 @@ int main(int argc, char *argv[])
     {
         cout << "Invalid Flow Control Mechanism" << endl;
     }
-    // Cleanup
     closesocket(new_socket_fd);
     closesocket(socket_fd);
     WSACleanup();

@@ -24,7 +24,7 @@ public:
     }
     Frame(string data, string source_addr, string dest_addr, unsigned int len, unsigned short frame_seq, string trailer)
     {
-        this->data = 'b' + data;
+        this->data = data;
         this->source_addr = source_addr;
         this->dest_addr = dest_addr;
         this->len = len;

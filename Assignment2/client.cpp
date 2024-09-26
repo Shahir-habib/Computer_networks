@@ -80,7 +80,8 @@ class StopAndWait
 {
 private:
     chrono::time_point<chrono::steady_clock> start_time;
-    int timeout_interval_ms; 
+    int timeout_interval_ms;
+
 public:
     StopAndWait() : timeout_interval_ms(1000) // Default timeout 1000 ms
     {
@@ -119,8 +120,7 @@ public:
             {
                 packets[fn].addCRC();
                 string frame = packets[fn].source_addr + packets[fn].dest_addr + to_string(packets[fn].len) +
-                                    to_string(packets[fn].frame_seq) + packets[fn].data + packets[fn].trailer;
-
+                               to_string(packets[fn].frame_seq) + packets[fn].data + packets[fn].trailer;
                 send(socket_fd, frame.c_str(), frame.size(), 0);
                 cout << "Frame " << fn << " sent" << endl;
 
@@ -133,7 +133,7 @@ public:
                     {
                         cout << "Frame " << fn << " timed out. Retransmitting..." << endl;
                         send(socket_fd, frame.c_str(), frame.size(), 0); // Retransmit the frame
-                        Timer(); // Restart the timer
+                        Timer();                                         // Restart the timer
                     }
                     else
                     {
@@ -143,9 +143,9 @@ public:
                         {
                             error("Error receiving data");
                         }
-                        buffer[recv_len] = '\0'; // Null-terminate the received data
+                        buffer[recv_len] = '\0';
                         string ack = buffer;
-                        if (buffer == to_string(fn)) // Assuming f_no is the acknowledgment
+                        if (buffer == to_string(fn))
                         {
                             cout << "Frame " << fn << " acknowledged" << endl;
                             ack_received = true;
@@ -154,11 +154,10 @@ public:
                         }
                         else
                         {
-                            cout << "Invalid acknowledgment received" <<ack<< endl;
+                            cout << "Invalid acknowledgment received" << ack << endl;
                             break;
                         }
                     }
-                    // Sleep briefly to avoid busy waiting
                     this_thread::sleep_for(chrono::milliseconds(100));
                 }
             }
@@ -168,6 +167,163 @@ public:
                 this_thread::sleep_for(chrono::milliseconds(100));
             }
         }
+    }
+};
+
+class GoBackN
+{
+private:
+    chrono::time_point<chrono::steady_clock> start_time;
+    int timeout_interval_ms;
+    int n;
+    int base;
+    int next_seq_num;
+
+public:
+    GoBackN(int window_size)
+        : timeout_interval_ms(1000), n(window_size), base(0), next_seq_num(0) {}
+
+    void startTimer()
+    {
+        start_time = chrono::steady_clock::now();
+    }
+
+    void updateTimeout(int round_trip_time_ms)
+    {
+        timeout_interval_ms = static_cast<int>(round_trip_time_ms * 1.5);
+    }
+
+    bool hasTimedOut()
+    {
+        auto current_time = chrono::steady_clock::now();
+        chrono::duration<double, milli> elapsed_time = current_time - start_time;
+        return elapsed_time.count() > timeout_interval_ms;
+    }
+
+    void sendGoBackN(SOCKET socket_fd)
+    {
+        cout << "Sending data using GoBackN" << endl;
+        char buffer[BUFFER_SIZE];
+        int tf = packets.size() - 1;
+        int ack;
+        while (base < tf)
+        {
+            while (next_seq_num < base + n && next_seq_num < packets.size())
+            {
+                packets[next_seq_num].addCRC();
+                packets[next_seq_num].frame_seq = next_seq_num % n;
+                string frame = packets[next_seq_num].source_addr + packets[next_seq_num].dest_addr +
+                               to_string(packets[next_seq_num].len) + to_string(packets[next_seq_num].frame_seq) +
+                               packets[next_seq_num].data + packets[next_seq_num].trailer;
+                send(socket_fd, frame.c_str(), frame.size(), 0);
+                cout << "Frame " << next_seq_num << " sent" << endl;
+                this_thread::sleep_for(chrono::milliseconds(2000));
+                next_seq_num++;
+            }
+            struct timeval timeout;
+            timeout.tv_sec = 2;  // seconds
+            timeout.tv_usec = 0; // microseconds
+            if (setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout, sizeof(timeout)) < 0)
+            {
+                perror("Set receive timeout failed");
+                next_seq_num = base; // Resend frames starting from the base
+            }
+            else
+            {
+                while (true)
+                {
+                    memset(buffer, 0, BUFFER_SIZE);
+                    int recv_len = recv(socket_fd, buffer, BUFFER_SIZE - 1, 0);
+                    if (recv_len == SOCKET_ERROR)
+                    {
+                        cerr << "Error receiving data" << endl;
+                        next_seq_num = base; // Resend frames starting from the base
+                        break;
+                    }
+                    if (recv_len > 0)
+                    {
+                        buffer[recv_len] = '\0';
+                        ack = stoi(buffer);
+                        cout << "Received ACK for Seq No: " << ack << endl;
+                        if (ack >= base % n)
+                        {
+                            base += (ack - base % n) + 1;
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        cout << "Timeout occurred. Resending frames starting from Seq No: " << base % n << endl;
+                        next_seq_num = base; // Resend frames starting from the base
+                        break;
+                    }
+                }
+            }
+            bool ack_received = false;
+            // while (!ack_received)
+            // {
+            //     memset(buffer, 0, BUFFER_SIZE);
+            //     if (hasTimedOut())
+            //     {
+            //         cout << "Timeout occurred. Resending frames starting from Seq No: " << base % n << endl;
+            //         next_seq_num = base; // Resend frames starting from the base
+            //         break;
+            //     }
+            //     else
+            //     {
+            //         int recv_len = recv(socket_fd, buffer, BUFFER_SIZE - 1, 0);
+            //         if (recv_len == SOCKET_ERROR)
+            //         {
+            //             cerr << "Error receiving data" << endl;
+            //             next_seq_num = base; // Resend frames starting from the base
+            //             break;
+            //         }
+
+            //         buffer[recv_len] = '\0';
+            //         ack = stoi(buffer);
+            //         cout << "Received ACK for Seq No: " << ack << endl;
+            //         if (ack >= base % n)
+            //         {
+            //             base += (ack - base % n) + 1;
+            //             ack_received = true;
+            //         }
+
+            //         else
+            //         {
+            //             cout << "Timeout occurred. Resending frames starting from Seq No: " << base % n << endl;
+            //             next_seq_num = base; // Resend frames starting from the base
+            //             break;
+            //         }
+            //     }
+            // }
+        }
+
+        cout << "All frames sent and acknowledged" << endl;
+        send(socket_fd, "exit", 4, 0);
+    }
+
+private:
+    bool
+    waitForAck(SOCKET socket_fd, char *buffer)
+    {
+        while (!hasTimedOut())
+        {
+            memset(buffer, 0, BUFFER_SIZE);
+            int recv_len = recv(socket_fd, buffer, BUFFER_SIZE - 1, 0);
+            if (recv_len == SOCKET_ERROR)
+            {
+                cerr << "Error receiving data" << endl;
+                return false;
+            }
+            if (recv_len > 0)
+            {
+                buffer[recv_len] = '\0';
+                return true;
+            }
+            this_thread::sleep_for(chrono::milliseconds(10));
+        }
+        cout << "Timeout occurred. Retransmitting..." << endl;
+        return false;
     }
 };
 int main(int argc, char *argv[])
@@ -240,7 +396,7 @@ int main(int argc, char *argv[])
         server_mac_address += rebuffer[i];
     }
     cout << "MAC Address received from server: " << rebuffer << endl;
-    
+
     FILE *file = fopen(argv[3], "rb");
     if (file == NULL)
     {
@@ -268,6 +424,15 @@ int main(int argc, char *argv[])
     }
     else if (flowControl == "GoBackN")
     {
+        cout << "Enter the window size : ";
+        int n;
+        cin >> n;
+        int total_frames = packets.size() - 1;
+        send(socket_fd, to_string(total_frames).c_str(), to_string(total_frames).size(), 0);
+        clear_buffer(buffer, BUFFER_SIZE);
+        send(socket_fd, to_string(n).c_str(), to_string(n).size(), 0);
+        GoBackN gbn(n);
+        gbn.sendGoBackN(socket_fd);
     }
     else if (flowControl == "SelectiveRepeat")
     {
