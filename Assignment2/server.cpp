@@ -226,6 +226,7 @@ public:
                 cout << "Acknowledgment for frame " << received_frame.frame_seq << " sent" << endl;
                 expected_frame_r = (expected_frame_r + 1) % window_size;
                 cout << "---------------------------------------------------------------------" << endl;
+                continue;
             }
             else if (receivedSeqNo < expected_frame_r)
             {
@@ -241,13 +242,91 @@ public:
                 // Frame out of order
                 std::cout << "Frame out of order. Rejecting Seq No: " << receivedSeqNo << std::endl;
             }
+            string ack = to_string(received_frame.frame_seq);
+            int nack = stoi(ack) - 1;
+            send(socket_fd, to_string(nack).c_str(), to_string(nack).size(), 0);
         }
 
         cout << "_____________________________________________________________________________________" << endl;
         cout << "All frames received and acknowledged" << endl;
     }
 };
+vector<Frame> packets;
+class SelectiveRepeatReceiver
+{
+    int n;
+    int total_frame;
+    int expected_frame_r = 0;
+    
+public:
+    SelectiveRepeatReceiver(int n,int tf)
+    {
+        this->n = n;
+        this->total_frame = tf;
+        for(int i=0;i<total_frame +2;i++)
+        {
+            packets.push_back(Frame("dummy", "source", "dest", 8, i));
+        }
+    }
+    void receive(SOCKET socket_fd)
+    {
+        char buffer[BUFFER_SIZE];
+        while (true)
+        {
+            char buffer[1024] = {0};
+            int bytesRead = recv(socket_fd, buffer, sizeof(buffer), 0);
+            if (bytesRead <= 0)
+                break;
 
+            std::string frame(buffer, bytesRead);
+            if (frame.empty())
+                break;
+            string received_frame_str(buffer);
+            cout << "Received Frame: " << received_frame_str << endl;
+            if (received_frame_str == "exit")
+            {
+                cout << "Exiting..." << endl;
+                break;
+            }
+            Frame received_frame = Frame::parseFrame(received_frame_str);
+            int receivedSeqNo = received_frame.frame_seq;
+
+            // If the received sequence number matches the expected one
+            if (received_frame.validateCRC())
+            {
+                cout << "Frame " << received_frame.frame_seq << " received" << endl;
+                packets.push_back(received_frame);
+                string ack = to_string(received_frame.frame_seq);
+                send(socket_fd, ack.c_str(), ack.size(), 0);
+                cout << "Acknowledgment for frame " << received_frame.frame_seq << " sent" << endl;
+                packets[received_frame.frame_seq] = received_frame;
+                expected_frame_r = (expected_frame_r + 1);
+                cout << "---------------------------------------------------------------------" << endl;
+                continue;
+            }
+            else if (receivedSeqNo < expected_frame_r)
+            {
+                // Handle duplicate frames (already acknowledged)
+                std::cout << "Duplicate Frame  " << receivedSeqNo << std::endl;
+            }
+            else if (received_frame.validateCRC())
+            {
+                std::cout << "Frame Corrupted. Rejecting Seq No: " << receivedSeqNo << std::endl;
+            }
+            else
+            {
+                // Frame out of order
+                std::cout << "Frame out of order. Rejecting Seq No: " << receivedSeqNo << std::endl;
+            }
+            string ack = to_string(received_frame.frame_seq);
+            int nack = stoi(ack) - 1;
+            send(socket_fd, to_string(nack).c_str(), to_string(nack).size(), 0);
+        }
+
+        cout << "_____________________________________________________________________________________" << endl;
+        cout << "All frames received and acknowledged" << endl;
+    }
+};
 int main(int argc, char *argv[])
 {
     WSADATA wsaData;
@@ -357,6 +436,26 @@ int main(int argc, char *argv[])
     }
     else if (flow_control == "SelectiveRepeat")
     {
+        clear_buffer(buffer, BUFFER_SIZE);
+        recv_len = recv(new_socket_fd, buffer, BUFFER_SIZE - 1, 0);
+        if (recv_len == SOCKET_ERROR)
+        {
+            error("Error receiving data");
+        }
+        buffer[recv_len] = '\0';
+        int window_size = stoi(buffer);
+        cout << "Window Size of Sender: " << window_size << endl;
+        clear_buffer(buffer, BUFFER_SIZE);
+        recv_len = recv(new_socket_fd, buffer, BUFFER_SIZE - 1, 0);
+        if (recv_len == SOCKET_ERROR)
+        {
+            error("Error receiving data");
+        }
+        buffer[recv_len] = '\0';
+        int tf = stoi(buffer);
+        cout << "Total Number of frame : " << tf << endl;
+        SelectiveRepeatReceiver selectiveRepeat(window_size,tf);
+        selectiveRepeat.receive(new_socket_fd);
     }
     else
     {

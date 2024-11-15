@@ -11,12 +11,13 @@
 #pragma comment(lib, "ws2_32.lib") // Link with ws2_32.lib for Winsock functions
 #pragma comment(lib, "Iphlpapi.lib")
 #include "framing.h"
+#include "channel.h"
 using namespace std;
 
 #define BUFFER_SIZE 1024
 string MAC_ADDRESS;
 string server_mac_address;
-vector<Frame> packets;
+vector<Frame> packets, correct_packets;
 void error(const char *msg)
 {
     fprintf(stderr, "%s: %d\n", msg, WSAGetLastError());
@@ -206,6 +207,16 @@ public:
         char buffer[BUFFER_SIZE];
         int tf = packets.size() - 1;
         int ack;
+        cout << "Want to Inject Error in the data (y/n) : ";
+        char ch;
+        cin >> ch;
+        if (ch == 'y')
+        {
+            cout << "Enter the index at which you want to inject error: ";
+            int index;
+            cin >> index;
+            ask(packets[index].data);
+        }
         while (base < tf)
         {
             while (next_seq_num < base + n && next_seq_num < packets.size())
@@ -248,6 +259,12 @@ public:
                         if (ack >= base % n)
                         {
                             base += (ack - base % n) + 1;
+                            break;
+                        }
+                        else
+                        {
+                            cout << "Frame in current window corrupted retransmitting" << base % n << endl;
+                            next_seq_num = base; // Resend frames starting from the base
                             break;
                         }
                     }
@@ -300,6 +317,12 @@ public:
 
         cout << "All frames sent and acknowledged" << endl;
         send(socket_fd, "exit", 4, 0);
+        packets.clear();
+        for (auto x : correct_packets)
+        {
+            packets.push_back(x);
+        }
+        correct_packets.clear();
     }
 
 private:
@@ -326,6 +349,101 @@ private:
         return false;
     }
 };
+
+struct Timer
+{
+    int seqNo;
+    chrono::time_point<chrono::steady_clock> startTime;
+    bool active;
+};
+
+class SelectiveRepeat
+{
+public:
+    int n;
+    int base;
+    int nextseqnum;
+    bool ackReceived[1000];
+    vector<Timer> timers;
+    SelectiveRepeat(int n) : n(n), base(0), nextseqnum(0)
+    {
+        for (int i = 0; i < 1000; i++)
+        {
+            ackReceived[i] = false;
+        }
+        for (int i = 0; i < n + 2; i++)
+        {
+            timers.push_back({i, chrono::steady_clock::now(), false});
+        }
+    }
+    void send_frame(SOCKET socket_fd, int seqno)
+    {
+        packets[seqno].addCRC();
+        packets[seqno].frame_seq = nextseqnum;
+        string frame = packets[seqno].source_addr + packets[seqno].dest_addr +
+                       to_string(packets[seqno].len) + to_string(packets[seqno].frame_seq) +
+                       packets[seqno].data + packets[seqno].trailer;
+        send(socket_fd, frame.c_str(), frame.size(), 0);
+        cout << "Frame " << seqno << " sent" << endl;
+
+        timers[seqno] = {seqno, chrono::steady_clock::now(), true};
+    }
+    void check_timer(SOCKET socket)
+    {
+        auto now = chrono::steady_clock::now();
+        for (auto &timer : timers)
+        {
+            if (timer.active && chrono::duration_cast<chrono::milliseconds>(now - timer.startTime).count() >= 3000)
+            {
+                cout << "Timeout for frame: " << timer.seqNo << ". Resending..." << endl;
+                send_frame(socket, timer.seqNo);
+                this_thread::sleep_for(chrono::milliseconds(1500));
+                timer.startTime = now;
+            }
+        }
+    }
+    void sendSelectiveRepeat(SOCKET socket_fd)
+    {
+        cout << "Sending data using Selective Repeat" << endl;
+        char buffer[BUFFER_SIZE];
+        int tf = packets.size() - 1;
+        int ack;
+        while (base < tf)
+        {
+            while (nextseqnum < base + n && nextseqnum < packets.size())
+            {
+                send_frame(socket_fd, nextseqnum);
+                this_thread::sleep_for(chrono::milliseconds(1000));
+                nextseqnum++;
+            }
+            char ackBuffer[BUFFER_SIZE];
+            int bytesRead = recv(socket_fd, ackBuffer, BUFFER_SIZE - 1, 0);
+            if (bytesRead > 0)
+            {
+                std::string ack(ackBuffer, bytesRead);
+                int ackSeqNo = std::stoi(ack);
+                if (ackSeqNo >= base && ackSeqNo < nextseqnum)
+                {
+                    ackReceived[ackSeqNo] = true;
+                    timers[ackSeqNo].active = false;
+                    std::cout << "Received ACK for frame: " << ackSeqNo << std::endl;
+                    while (base < tf && ackReceived[base])
+                    {
+                        base++;
+                    }
+                }
+                else{
+                    nextseqnum = ackSeqNo;
+                }
+            }
+            check_timer(socket_fd);
+            this_thread::sleep_for(chrono::milliseconds(100));
+        }
+        cout << "All frames sent and acknowledged" << endl;
+        send(socket_fd, "exit", 4, 0);
+    }
+};
+
 int main(int argc, char *argv[])
 {
     WSADATA wsaData;
@@ -412,6 +530,7 @@ int main(int argc, char *argv[])
     for (size_t i = 0; i < text.size(); i += 8)
     {
         packets.push_back(Frame(text.substr(i, 8), MAC_ADDRESS, server_mac_address, 8, i / 8));
+        correct_packets.push_back(Frame(text.substr(i, 8), MAC_ADDRESS, server_mac_address, 8, i / 8));
     }
     cout << "Enter the flow Control Mechanism by which you want to send the data (StopAndWait/GoBackN/SelectiveRepeat): ";
     string flowControl;
@@ -436,6 +555,14 @@ int main(int argc, char *argv[])
     }
     else if (flowControl == "SelectiveRepeat")
     {
+        cout << "Enter the window size : ";
+        int n;
+        cin >> n;
+        SelectiveRepeat sr(n);
+        send(socket_fd, to_string(n).c_str(), to_string(n).size(), 0);
+        this_thread::sleep_for(chrono::milliseconds(1000));
+        send(socket_fd, to_string(packets.size() - 1).c_str(), to_string(packets.size() - 1).size(), 0);
+        sr.sendSelectiveRepeat(socket_fd);
     }
     else
     {
